@@ -1,7 +1,7 @@
 -e nemo-gym[dev,sandbox] @ ../../
 jsonschema>=4.25.1,<5
-# Includes ordered assistant history, scoped lifecycle hooks, and summary-fork isolation.
-nooa @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@19caab169b018476ac433d040f6ae3f06aeff101
-# Keep the CLI and benchmark packages on the same revision as NOOA core.
-nooa-cli @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz#subdirectory=packages/nooa-cli
-nooa-bench @ https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz#subdirectory=packages/nooa-bench
+# Core, CLI and both agents share one immutable NOOA revision.
+nooa @ https://github.com/furgalep/labs-OO-Agents/archive/d1423ce927b8acd3c4e48ab5f975fd47f5e9a966.tar.gz
+nooa-cli @ https://github.com/furgalep/labs-OO-Agents/archive/d1423ce927b8acd3c4e48ab5f975fd47f5e9a966.tar.gz#subdirectory=packages/nooa-cli
+nooa-bench @ https://github.com/furgalep/labs-OO-Agents/archive/d1423ce927b8acd3c4e48ab5f975fd47f5e9a966.tar.gz#subdirectory=packages/nooa-bench
+nooa-atom @ https://github.com/furgalep/labs-OO-Agents/archive/d1423ce927b8acd3c4e48ab5f975fd47f5e9a966.tar.gz#subdirectory=packages/nooa-atom

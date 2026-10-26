@@ -17,9 +17,10 @@ cd responses_api_agents/nooa_agent
 uv pip install -r requirements.txt
 ```
 
-The requirements pin all three NOOA packages: `nooa`, `nooa-cli`, and `nooa-bench`. The CLI supplies executor
-support, and the benchmark package supplies the default BenchAgent. Gym's server installation uses this same
-requirements file.
+The requirements pin all four NOOA packages to one revision: `nooa`, `nooa-cli`, `nooa-bench`, and `nooa-atom`.
+The CLI supplies executor support; the other packages supply BenchAgent and Atom. Gym's server installation
+and sandbox runtime packaging use this same requirements file. BenchAgent remains the default; the Atom recipe
+selects a different agent without changing dependencies.
 
 ## Embedded CodeAct scope
 
