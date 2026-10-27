@@ -31,7 +31,7 @@ service, which reads the references back at seed, each checked against its hash,
 row whose artifacts cannot be read (400).
 
 With ``sandbox_provider`` set, each Environment Server episode also gets a sandbox from Gym's
-sandbox providers, lent to the harness (``SandboxAccess``) and stopped when the episode closes.
+sandbox providers, lent to the harness (``SandboxAccess``) and stopped before the episode is graded.
 The sandbox gets the episode's file API in ``OFFICEENV_API_URL`` and ``OFFICEENV_API_TOKEN``
 (``OFFICEENV.md`` in the workspace documents it), so file content moves between the workspace and
 the simulated apps over HTTP instead of through the model's context. A sandbox can reach this
@@ -365,10 +365,12 @@ class _Episode:
     episode_id: EpisodeId
     task_id: TaskId
     tools: list[str]
-    # In sandbox mode: the episode's file API token, its sandbox and the access lent to the harness.
+    # In sandbox mode: the episode's file API token, its sandbox and the access lent to the harness, and whether
+    # its verification has started, from which point its tools are closed.
     token: str | None = None
     sandbox: AsyncSandbox | None = None
     access: SandboxAccess | None = None
+    grading: bool = False
 
 
 class OfficeEnvResourcesServer(SimpleResourcesServer):
@@ -603,6 +605,20 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
+    async def _stop_before_grading(self, session_id: str) -> None:
+        """In sandbox mode, close the episode's tools and file API and stop its sandbox before it is graded, so a
+        process the harness left running in the sandbox cannot change what is graded. A failed stop is logged and
+        grading goes on; the episode keeps the sandbox, so close stops it."""
+        episode = self._episodes.get(session_id) if self.config.sandbox_provider is not None else None
+        if episode is None:
+            return
+        episode.grading = True
+        async with self._locks.setdefault(session_id, asyncio.Lock()):
+            try:
+                await self._release(episode)
+            except Exception:
+                LOGGER.exception("Could not stop the sandbox of OfficeEnv session %s before grading", session_id)
+
     async def retire_session_state(self, session_id: str) -> None:
         episode = self._episodes.get(session_id)
         if episode is not None and episode.sandbox is not None:
@@ -622,6 +638,11 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         if self.service.store.get(session_id) is None:
             raise ResourcesSessionLostError("No seeded OfficeEnv session for this tool call")
+        episode = self._episodes.get(session_id)
+        if episode is not None and episode.grading:
+            raise HTTPException(
+                status_code=409, detail="This episode's verification has started; its tools are closed"
+            )
         reply = self.service.call(session_id, tool_name, await request.body())
         return Response(content=reply.text(), media_type="application/json", status_code=reply.status)
 
@@ -629,7 +650,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         self, request: Request, body: OfficeEnvVerifyRequest
     ) -> OfficeEnvVerifyResponse | OfficeEnvLengthPenaltyVerifyResponse:
         self._require_gym_caller(request)
-        result = self.service.verify(request.session[SESSION_ID_KEY])
+        session_id = request.session[SESSION_ID_KEY]
+        await self._stop_before_grading(session_id)
+        result = self.service.verify(session_id)
         if result.get("officeenv_failure") == "no_session":
             # Never seeded, verified already, closed, or gone with a restart: the world went with
             # it, so the reward would measure the environment, not the policy.
