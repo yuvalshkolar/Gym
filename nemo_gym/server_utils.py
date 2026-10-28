@@ -1987,12 +1987,12 @@ repr(e): {repr(e)}"""
         # so gating the lazy import on their config keeps the MCP SDK out of agent/model processes that never need it.
         mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
-            from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
+            from nemo_gym.mcp_auto_exposure import maybe_auto_expose, session_token_header, session_token_serializer
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
             mcp_token_routing = dict(
-                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+                mcp_token_header=session_token_header(server), mcp_token_serializer=session_token_serializer(server)
             )
         server.setup_liveness(app)
         server.set_ulimit()
