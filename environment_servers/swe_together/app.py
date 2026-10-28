@@ -22,6 +22,7 @@ from environment_servers.swe_together.context import INCREMENTAL_NOTICE, project
 from environment_servers.swe_together.egress import DependencyAccess, install_trust_bundle
 from environment_servers.swe_together.evaluation import PASS_THRESHOLD, interaction_metrics, run_judge
 from environment_servers.swe_together.guidance import session_analysis
+from environment_servers.swe_together.judge_evidence import collect_judge_evidence
 from environment_servers.swe_together.metrics import aggregate
 from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
 from environment_servers.swe_together.repo_config import discover_repo_config_files
@@ -343,6 +344,11 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             # Interaction scoring is part of grading, so its captured calls belong to this verifier invocation.
             with verifier_invocation_context(f"verify-{uuid4().hex}"):
                 verification = await self._verify(state, initial, activations)
+            trajectory = agent_close.trajectory
+            if verification.get("judge_capture_episode"):
+                trajectory = await collect_judge_evidence(
+                    trajectory, verification, self.server_client.global_config_dict, state.directory
+                )
             await judge_cleanup.close()
             await candidate_cleanup.close()
             await runtime_cleanup.close()
@@ -356,7 +362,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(agent_close.trajectory),
+                        "ng_trajectory": request.trajectory_for_collection(trajectory),
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),

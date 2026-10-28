@@ -327,8 +327,10 @@ async def test_webserver_lifespan_closes_runtime_helper(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("activation_error", [False, True])
-async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, monkeypatch, activation_error):
+@pytest.mark.parametrize("activation_error,receipt_missing", [(False, False), (True, False), (False, True)])
+async def test_local_lifecycle_closes_candidate_before_verification(
+    tmp_path, monkeypatch, activation_error, receipt_missing
+):
     environment = server(tmp_path)
     order = []
     sandbox = SimpleNamespace(serialize=AsyncMock(return_value={}))
@@ -362,14 +364,55 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         assert current_verifier_invocation_id().startswith("verify-")
         assert order[-1] == "agent close"
         order.append("verify")
-        return {
+        model = {"type": "responses_api_models", "name": "judge-model"}
+        (tmp_path / "explicit-child.capture.jsonl").write_text(
+            json.dumps(
+                {
+                    "model_call_id": "judge-call",
+                    "model_ref": model,
+                    "status_code": 200,
+                    "request": {"messages": []},
+                    "response": {"id": "judge-response", "content": []},
+                }
+            )
+            + "\n"
+        )
+        verification = {
             "responses_create_params": initial,
             "response": activations[-1].response,
             "reward": 1,
             "judge_score": 1,
             "task_id": "task",
             "evaluation_completed": True,
+            "judge_capture_episode": "explicit-child",
+            "judge_close": {
+                "agent_session_id": "judge-session",
+                "cleanup_confirmed": True,
+                "agent_observations": {
+                    "source": "claude_code",
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": "judge-invocation",
+                            "status": "completed",
+                            "model_calls": [{"model_ref": model, "response_id": "judge-response"}],
+                        }
+                    ],
+                },
+            },
         }
+        if receipt_missing:
+            verification.pop("judge_close")
+            verification.update(
+                reward=0,
+                judge_score=0,
+                mask_sample=True,
+                evaluation_completed=False,
+                judge_close_error="connection lost",
+                failure_kind=app.JUDGE_FAILED,
+                failure_reason="Judge cleanup was not confirmed",
+            )
+        return verification
 
     async def post(name, path, *, json, cookies, headers=None, _control=False):
         if path == "/v1/agent_sessions":
@@ -409,7 +452,13 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         return response.payload
 
     monkeypatch.setattr(app, "get_response_json", payload)
-    environment.server_client = SimpleNamespace(post=post)
+    environment.server_client = SimpleNamespace(
+        post=post,
+        global_config_dict={
+            "observability_enabled": True,
+            "model_call_capture_dir": str(tmp_path),
+        },
+    )
     req = request()
     result = await environment.run_request(req)
     collected = _episode_record(result.model_dump(mode="json"))
@@ -431,8 +480,16 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         assert collected["ng_trajectory"]["rollout_id"] == "one"
         assert (tmp_path / "one" / "candidate-agent-close.json").exists()
         return
-    assert result.result and result.result.reward == 1
-    assert collected["reward"] == 1
+    assert result.result and result.result.reward == (0 if receipt_missing else 1)
+    assert collected["reward"] == (0 if receipt_missing else 1)
+    if receipt_missing:
+        assert collected["mask_sample"] is True and collected["evaluation_completed"] is False
+        assert not collected["ng_trajectory"]["verifier_invocations"]
+        assert "judge_receipt_unavailable" in {gap["code"] for gap in collected["ng_trajectory"]["gaps"]}
+    else:
+        assert collected["ng_trajectory"]["verifier_invocations"][0]["invocation_id"] == "judge-invocation"
+    assert collected["ng_trajectory"]["model_calls"][0]["model_call_id"] == "judge-call"
+    assert (tmp_path / "one" / "judge-model-calls.json").exists()
     assert result.result.ng_agent_close.trajectory.task_id == "task"
     assert result.result.ng_trajectory.rollout_id == "one"
     assert collected["ng_trajectory"]["rollout_id"] == "one"

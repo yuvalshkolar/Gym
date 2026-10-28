@@ -58,7 +58,7 @@ class AuxiliaryModel:
         cookies: dict[str, str],
         temperature: float,
         environment_role: Literal["user_simulator"] | None = None,
-    ):
+    ) -> None:
         """``environment_role`` makes each call its own environment invocation; without it, the caller owns calls."""
         self.client = client
         self.name = name
@@ -73,7 +73,7 @@ class AuxiliaryModel:
         message_history: list | None = None,
         tools: list | None = None,
         tool_choice: str | None = None,
-    ):
+    ) -> ModelMessage:
         body = {
             "model": self.name,
             "messages": (message_history or []) + [{"role": "user", "content": prompt}],
