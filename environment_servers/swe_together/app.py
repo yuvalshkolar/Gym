@@ -66,6 +66,7 @@ from nemo_gym.failure_kinds import JUDGE_FAILED
 from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.rollout_correlation import verifier_invocation_context
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.config import resolve_provider_config
@@ -339,7 +340,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             stage = "cleanup"
             await agent_cleanup.close()
             stage = "verification"
-            verification = await self._verify(state, initial, activations)
+            # Interaction scoring is part of grading, so its captured calls belong to this verifier invocation.
+            with verifier_invocation_context(f"verify-{uuid4().hex}"):
+                verification = await self._verify(state, initial, activations)
             await judge_cleanup.close()
             await candidate_cleanup.close()
             await runtime_cleanup.close()
@@ -549,6 +552,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             self.config.simulator_model.name,
             cookies={},
             temperature=self.config.simulator_temperature,
+            environment_role="user_simulator",
         )
         state.simulator = UserAgent(
             llm=state.simulator_model, original_user_messages=messages, session_analysis=analysis, max_messages=None

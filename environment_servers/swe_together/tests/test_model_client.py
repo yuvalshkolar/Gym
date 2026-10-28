@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
@@ -10,6 +10,11 @@ from aiohttp import ClientResponseError
 from environment_servers.swe_together import model_client
 from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
 from environment_servers.swe_together.simulator import UserAgent
+from nemo_gym.rollout_correlation import (
+    current_environment_invocation,
+    current_verifier_invocation_id,
+    verifier_invocation_context,
+)
 
 
 GATEWAY_TIMEOUT = b'{"error":{"message":"litellm.Timeout: Connection timed out. Timeout passed=360.0"}}'
@@ -65,3 +70,75 @@ def test_error_without_http_cause_has_no_status():
         "type": "ValueError",
         "message": "asset digest mismatch",
     }
+
+
+def _client(owners: list, *, error: Exception | None = None) -> MagicMock:
+    async def post(*_args, **_kwargs):
+        owners.append((current_environment_invocation(), current_verifier_invocation_id()))
+        if error is not None:
+            raise error
+        return MagicMock(ok=True, read=AsyncMock(return_value=b'{"choices": [{"message": {"content": "next"}}]}'))
+
+    client = MagicMock()
+    client.post = post
+    return client
+
+
+async def test_simulator_calls_declare_one_environment_owner_each():
+    owners = []
+    model = AuxiliaryModel(_client(owners), "sim", cookies={}, temperature=0, environment_role="user_simulator")
+    assert (await model.call("first")).content == "next"
+    await model.call("second")
+
+    assert [owner for owner, _ in owners] == [
+        (record["environment_invocation_id"], "user_simulator") for record in model.calls
+    ]
+    assert len({record["environment_invocation_id"] for record in model.calls}) == 2
+    assert current_environment_invocation() is None
+
+
+async def test_failed_simulator_call_keeps_its_declared_owner():
+    owners = []
+    client = _client(owners, error=ConnectionError("reset"))
+    model = AuxiliaryModel(client, "sim", cookies={}, temperature=0, environment_role="user_simulator")
+    with pytest.raises(ConnectionError):
+        await model.call("first")
+    assert owners == [((model.calls[0]["environment_invocation_id"], "user_simulator"), None)]
+    assert model.calls[0]["error"] == "reset"
+
+
+async def test_scoring_calls_leave_ownership_to_the_enclosing_verifier():
+    owners = []
+    model = AuxiliaryModel(_client(owners), "score", cookies={}, temperature=0)
+    with verifier_invocation_context("verify-1"):
+        await model.call("tag")
+    assert owners == [(None, "verify-1")]
+    assert "environment_invocation_id" not in model.calls[0]
+
+
+async def test_prepare_wires_simulator_calls_to_environment_ownership(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from environment_servers.swe_together import app
+    from environment_servers.swe_together.tests.test_environment import request, server
+
+    environment = server(tmp_path)
+    owners = []
+    environment.server_client = _client(owners)
+    environment._runtime = SimpleNamespace(prepare=AsyncMock(), manifest={"artifacts": {}})
+    req = request()
+    episode = app.Episode(req, req.task.task_input.task_data, tmp_path, tmp_path)
+    episode.task_metadata = {"record": {"history_policy": "pinned"}, "agent_kwargs": {}}
+    episode.dependency_access = SimpleNamespace(register=AsyncMock())
+    (tmp_path / "instruction.md").write_text("original")
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None, stdout="", stderr=""))
+    )
+    monkeypatch.setattr(app.SWETEnvironmentServer, "_new_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(app, "RepositorySnapshots", lambda *a, **k: SimpleNamespace(capture=AsyncMock()))
+    monkeypatch.setattr(app, "discover_repo_config_files", AsyncMock(return_value=""))
+    monkeypatch.setattr(app, "session_analysis", lambda _: (None, ["original"]))
+
+    await environment._prepare(episode)
+    await episode.simulator_model.call("next")
+    assert owners == [((episode.simulator_model.calls[0]["environment_invocation_id"], "user_simulator"), None)]

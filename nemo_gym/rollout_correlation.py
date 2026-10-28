@@ -16,7 +16,7 @@ import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -31,10 +31,15 @@ from nemo_gym.global_config import (
 
 
 VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
+ENVIRONMENT_INVOCATION_HEADER = "x-ng-environment-invocation-id"
+ENVIRONMENT_ROLE_HEADER = "x-ng-environment-role"
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
 _VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
+_ENVIRONMENT_INVOCATION: ContextVar[Optional[tuple[str, Literal["user_simulator"]]]] = ContextVar(
+    "nemo_gym_environment_invocation", default=None
+)
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
@@ -137,6 +142,23 @@ def verifier_invocation_context(invocation_id: str) -> Iterator[None]:
         yield
     finally:
         _VERIFIER_INVOCATION_ID.reset(token)
+
+
+def current_environment_invocation() -> Optional[tuple[str, Literal["user_simulator"]]]:
+    """Return the enclosing environment invocation as ``(invocation_id, role)``, if any."""
+    return _ENVIRONMENT_INVOCATION.get()
+
+
+@contextmanager
+def environment_invocation_context(invocation_id: str, *, role: Literal["user_simulator"]) -> Iterator[None]:
+    """Carry one environment-owned model consultation, such as a user-simulator turn, across its attempts."""
+    if role != "user_simulator":
+        raise ValueError("unsupported environment role")
+    token = _ENVIRONMENT_INVOCATION.set((invocation_id, role))
+    try:
+        yield
+    finally:
+        _ENVIRONMENT_INVOCATION.reset(token)
 
 
 class RolloutContextMiddleware:

@@ -195,13 +195,26 @@ class VerifierInvocation(ObservationModel):
         return validate_failure_kind(value)
 
 
-def exclude_verifier_model_calls(
+class EnvironmentInvocation(ObservationModel):
+    """One model consultation made by the environment itself, with all its attempts.
+
+    The environment declares the role on each request; it is never inferred from a model name.
+    These calls are owned evidence, not policy decisions, so they never belong to a policy step.
+    """
+
+    kind: Literal["environment_invocation"] = "environment_invocation"
+    invocation_id: str
+    role: Literal["user_simulator"]
+    model_calls: list[ModelCallRef] = Field(default_factory=list)
+
+
+def exclude_non_agent_model_calls(
     calls: Iterable[ModelCallRecord],
-    verifier_invocations: Iterable[VerifierInvocation],
+    owners: Iterable[VerifierInvocation | EnvironmentInvocation],
 ) -> list[ModelCallRecord]:
-    """Exclude explicitly verifier-owned attempts from agent and step joins."""
-    verifier_call_ids = {ref.model_call_id for inv in verifier_invocations for ref in inv.model_calls}
-    return [call for call in calls if call.model_call_id not in verifier_call_ids]
+    """Exclude explicitly verifier- or environment-owned attempts from agent and step joins."""
+    owned_call_ids = {ref.model_call_id for inv in owners for ref in inv.model_calls}
+    return [call for call in calls if call.model_call_id not in owned_call_ids]
 
 
 class ToolCallObservation(ObservationModel):
@@ -355,6 +368,9 @@ class TrajectoryRecord(ObservationModel):
     rollout_id: str
     invocations: list[AgentInvocation] = Field(default_factory=list)
     verifier_invocations: list[VerifierInvocation] = Field(default_factory=list)
+    environment_invocations: list[EnvironmentInvocation] = Field(
+        default_factory=list, exclude_if=lambda value: not value
+    )
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
@@ -362,7 +378,10 @@ class TrajectoryRecord(ObservationModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "TrajectoryRecord":
-        invocation_ids = [invocation.invocation_id for invocation in [*self.invocations, *self.verifier_invocations]]
+        invocation_ids = [
+            invocation.invocation_id
+            for invocation in [*self.invocations, *self.verifier_invocations, *self.environment_invocations]
+        ]
         if len(invocation_ids) != len(set(invocation_ids)):
             raise ValueError("invocation_id must be unique within a trajectory")
         model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]

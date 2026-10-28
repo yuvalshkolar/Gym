@@ -17,6 +17,7 @@ from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseUsage
 from nemo_gym.rollout_collection import _episode_record
+from nemo_gym.rollout_correlation import current_verifier_invocation_id
 
 
 def activation(index=0, **kwargs):
@@ -358,6 +359,7 @@ async def test_local_lifecycle_closes_candidate_before_verification(tmp_path, mo
         value.cleanup_receipts[role + "_sandbox"] = {"cleanup_confirmed": True}
 
     async def verify(self, value, initial, activations):
+        assert current_verifier_invocation_id().startswith("verify-")
         assert order[-1] == "agent close"
         order.append("verify")
         return {

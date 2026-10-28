@@ -3,11 +3,15 @@
 """Auxiliary models use the same asynchronous Gym transport as other servers."""
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass
 from time import monotonic, time
+from typing import Literal
+from uuid import uuid4
 
 from aiohttp import ClientResponseError
 
+from nemo_gym.rollout_correlation import environment_invocation_context
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
@@ -46,11 +50,21 @@ class ModelMessage:
 
 
 class AuxiliaryModel:
-    def __init__(self, client: ServerClient, name: str, *, cookies: dict[str, str], temperature: float):
+    def __init__(
+        self,
+        client: ServerClient,
+        name: str,
+        *,
+        cookies: dict[str, str],
+        temperature: float,
+        environment_role: Literal["user_simulator"] | None = None,
+    ):
+        """``environment_role`` makes each call its own environment invocation; without it, the caller owns calls."""
         self.client = client
         self.name = name
         self.cookies = cookies
         self.temperature = temperature
+        self.environment_role = environment_role
         self.calls = []
 
     async def call(
@@ -72,8 +86,13 @@ class AuxiliaryModel:
         record = {"request": body, "attempt": 1, "started_at_unix_seconds": time()}
         self.calls.append(record)
         started = monotonic()
+        owner = nullcontext()
+        if self.environment_role is not None:
+            record["environment_invocation_id"] = f"{self.environment_role}-{uuid4().hex}"
+            owner = environment_invocation_context(record["environment_invocation_id"], role=self.environment_role)
         try:
-            response = await self.client.post(self.name, "/v1/chat/completions", json=body, cookies=self.cookies)
+            with owner:
+                response = await self.client.post(self.name, "/v1/chat/completions", json=body, cookies=self.cookies)
             await raise_for_status(response)
             data = await get_response_json(response)
             message = data["choices"][0]["message"]

@@ -261,3 +261,46 @@ def test_only_explicit_verifier_calls_are_excluded_from_policy_steps(collection)
         assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
         trajectory[collection].pop()
         assert checks(record)["ownership.call_owner"]["status"] == "fail"
+
+
+def _with_environment_call(record):
+    trajectory = record["ng_trajectory"]
+    simulator = deepcopy(trajectory["model_calls"][0])
+    simulator["model_call_id"] = "simulator-call"
+    simulator["response_metadata"]["response_id"] = "simulator-response"
+    trajectory["model_calls"].append(simulator)
+    invocation = {
+        "invocation_id": "sim",
+        "role": "user_simulator",
+        "model_calls": [{"model_call_id": "simulator-call"}],
+    }
+    trajectory["environment_invocations"] = [invocation]
+    return trajectory, invocation
+
+
+def test_environment_calls_are_owned_but_not_policy_steps():
+    record = evidence_record()
+    trajectory, invocation = _with_environment_call(record)
+    result = checks(record)
+    assert result["ownership.call_owner"]["status"] == "pass"
+    assert result["steps.attempt_accounting"]["status"] == "pass"
+
+    trajectory["invocations"][0]["model_calls"].append({"model_call_id": "simulator-call"})
+    assert checks(record)["ownership.call_owner"]["status"] == "fail"
+    trajectory["invocations"][0]["model_calls"].pop()
+
+    trajectory["turns"][0]["model_calls"].append({"model_call_id": "simulator-call"})
+    assert checks(record)["steps.attempt_accounting"]["status"] == "fail"
+    trajectory["turns"][0]["model_calls"].pop()
+
+    invocation.pop("invocation_id")
+    assert checks(record)["invocations.identity"]["status"] == "fail"
+
+
+def test_environment_ownership_does_not_hide_a_policy_step_gap():
+    record = evidence_record()
+    trajectory, _ = _with_environment_call(record)
+    trajectory["turns"].pop()
+    result = checks(record)
+    assert result["ownership.call_owner"]["status"] == "pass"
+    assert result["steps.attempt_accounting"]["status"] == "fail"

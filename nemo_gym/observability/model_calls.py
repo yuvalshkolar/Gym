@@ -19,10 +19,12 @@ from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
+    EnvironmentInvocation,
+    ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
     VerifierInvocation,
-    exclude_verifier_model_calls,
+    exclude_non_agent_model_calls,
     join_agent_model_calls,
     join_assistant_message_calls,
 )
@@ -334,24 +336,50 @@ def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelC
 
 def read_available_model_call_records(store: CaptureStore, rollout_id: str) -> tuple[list[ModelCallRecord], int]:
     """Read valid call records and count damaged records."""
-    calls, _, invalid_count = _read_capture_records(store, rollout_id)
+    calls, _, _, invalid_count = _read_capture_records(store, rollout_id)
     return calls, invalid_count
+
+
+def _merge_environment_call_observation(
+    invocations: dict[str, EnvironmentInvocation], exchange: Mapping[str, object], *, model_call_id: str
+) -> None:
+    """Link a captured attempt to its caller-declared environment invocation and role, when supplied."""
+    invocation_id = exchange.get("environment_invocation_id")
+    if (
+        not isinstance(invocation_id, str)
+        or not invocation_id.strip()
+        or exchange.get("environment_role") != "user_simulator"
+    ):
+        # Keep the raw call without claiming ownership when the request metadata is invalid.
+        return
+    reference = ModelCallRef(model_call_id=model_call_id)
+    existing = invocations.get(invocation_id)
+    if existing is None:
+        invocations[invocation_id] = EnvironmentInvocation(
+            invocation_id=invocation_id, role=exchange.get("environment_role"), model_calls=[reference]
+        )
+    elif existing.role != exchange.get("environment_role"):
+        raise ValueError("environment invocation attempts must declare one role")
+    else:
+        existing.model_calls.append(reference)
 
 
 def _read_capture_records(
     store: CaptureStore, rollout_id: str
-) -> tuple[list[ModelCallRecord], dict[str, "VerifierInvocation"], int]:
+) -> tuple[list[ModelCallRecord], dict[str, VerifierInvocation], dict[str, EnvironmentInvocation], int]:
     exchanges, invalid_count = store.read_available(rollout_id)
     calls = []
-    verifier_invocations: dict[str, "VerifierInvocation"] = {}
+    verifier_invocations: dict[str, VerifierInvocation] = {}
+    environment_invocations: dict[str, EnvironmentInvocation] = {}
     for index, exchange in exchanges:
         try:
             call = build_model_call_record(exchange, call_index=index)
             calls.append(call)
             merge_verifier_call_observation(verifier_invocations, exchange, model_call_id=call.model_call_id)
+            _merge_environment_call_observation(environment_invocations, exchange, model_call_id=call.model_call_id)
         except Exception:
             invalid_count += 1
-    return calls, verifier_invocations, invalid_count
+    return calls, verifier_invocations, environment_invocations, invalid_count
 
 
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
@@ -480,14 +508,17 @@ def merge_model_call_capture_into_record(
     if rollout_id is None:
         return record
     gaps: list[ObservationGap] = []
-    verifier_invocations: dict[str, "VerifierInvocation"] = {}
+    verifier_invocations: dict[str, VerifierInvocation] = {}
+    environment_invocations: dict[str, EnvironmentInvocation] = {}
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:
         calls = []
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
-            calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
+            calls, verifier_invocations, environment_invocations, invalid_count = _read_capture_records(
+                store, rollout_id
+            )
             if invalid_count:
                 gaps.append(
                     ObservationGap(
@@ -523,7 +554,9 @@ def merge_model_call_capture_into_record(
                         exc_info=True,
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
-            agent_calls = exclude_verifier_model_calls(calls, verifier_invocations.values())
+            agent_calls = exclude_non_agent_model_calls(
+                calls, [*verifier_invocations.values(), *environment_invocations.values()]
+            )
             bundle = join_agent_model_calls(bundle, agent_calls)
             if any(call.client_assistant_message_id for call in calls):
                 try:
@@ -554,6 +587,8 @@ def merge_model_call_capture_into_record(
     }
     if verifier_invocations:
         capture["verifier_invocations"] = [inv.model_dump(mode="json") for inv in verifier_invocations.values()]
+    if environment_invocations:
+        capture["environment_invocations"] = [inv.model_dump(mode="json") for inv in environment_invocations.values()]
     if gaps:
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture

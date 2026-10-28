@@ -145,6 +145,7 @@ class Inspector:
         self.calls = _objects(self.trajectory.get("model_calls"))
         self.invocations = _objects(self.trajectory.get("invocations"))
         self.verifier_invocations = _objects(self.trajectory.get("verifier_invocations"))
+        self.environment_invocations = _objects(self.trajectory.get("environment_invocations"))
         self.turns = _objects(self.trajectory.get("turns"))
         self.tools = _objects(self.trajectory.get("tool_calls"))
         self.observations = _objects(_mapping(self.record.get(NG_AGENT_OBSERVATIONS_KEY)).get("records"))
@@ -541,7 +542,7 @@ class Inspector:
                             "type": "array",
                             "items": required_object(invocation_id={"type": "string", "pattern": "\\S"}),
                         }
-                        for field in ("invocations", "verifier_invocations")
+                        for field in ("invocations", "verifier_invocations", "environment_invocations")
                     },
                 },
                 depends_on=("invocations.present",),
@@ -598,7 +599,7 @@ class Inspector:
                                 }
                             ),
                         }
-                        for field in ("invocations", "verifier_invocations")
+                        for field in ("invocations", "verifier_invocations", "environment_invocations")
                     },
                 },
                 depends_on=("invocations.present",),
@@ -916,7 +917,7 @@ class Inspector:
         )
         owners: dict[int, list[str]] = {i: [] for i in range(len(self.calls))}
         valid = True
-        for inv in [*self.invocations, *self.verifier_invocations]:
+        for inv in [*self.invocations, *self.verifier_invocations, *self.environment_invocations]:
             for reference in _objects(inv.get("model_calls")):
                 matches = _resolve(reference, self.calls)
                 valid &= len(matches) == 1
@@ -928,7 +929,7 @@ class Inspector:
                 id="ownership.call_target",
                 tier="P0",
                 evidence=("TE-8",),
-                location="$.ng_trajectory['invocations','verifier_invocations'][*].model_calls",
+                location="$.ng_trajectory['invocations','verifier_invocations','environment_invocations'][*].model_calls",
                 reason="call reference does not resolve uniquely with all supplied identifiers",
                 predicate=lambda: valid,
                 available=self.available,
@@ -946,16 +947,17 @@ class Inspector:
                 id="ownership.call_owner",
                 tier="P0",
                 evidence=("TE-8",),
-                location="$.ng_trajectory['invocations','verifier_invocations'][*].model_calls",
+                location="$.ng_trajectory['invocations','verifier_invocations','environment_invocations'][*].model_calls",
                 reason="each saved call must have exactly one invocation owner",
                 predicate=lambda: all((len(v) == 1 for v in owners.values())),
                 available=self.available,
                 depends_on=("ownership.call_target",),
             )
         )
+        # Verifier and environment calls are owned evidence, not policy attempts.
         helpers = {
             index
-            for inv in self.verifier_invocations
+            for inv in [*self.verifier_invocations, *self.environment_invocations]
             for reference in _objects(inv.get("model_calls"))
             for index in _resolve(reference, self.calls)
         }

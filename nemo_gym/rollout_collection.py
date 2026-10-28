@@ -111,6 +111,7 @@ from nemo_gym.rollout_observability import (
     NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
+    EnvironmentInvocation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
@@ -693,16 +694,20 @@ def _turns_from_model_calls(
     resolved: Any,
     *,
     verifier_invocations: Iterable[VerifierInvocation] = (),
+    environment_invocations: Iterable[EnvironmentInvocation] = (),
 ) -> list[TrajectoryTurn]:
     """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
-    a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
+    or auxiliary calls that do not belong to the agent. Explicit verifier or environment ownership also
+    excludes a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
     """
-    verifier_call_ids = {
-        ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
+    owned_call_ids = {
+        ref.model_call_id
+        for invocation in [*verifier_invocations, *environment_invocations]
+        for ref in invocation.model_calls
+        if ref.model_call_id
     }
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
@@ -718,7 +723,7 @@ def _turns_from_model_calls(
     tool_counts: Counter = Counter()
     for call in model_calls:
         metadata = call.response_metadata
-        if call.model_call_id in verifier_call_ids:
+        if call.model_call_id in owned_call_ids:
             continue
         if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
             # HTTP error payloads are retained attempts, not model decisions.
@@ -761,6 +766,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
     verifier_invocations: list[VerifierInvocation] = []
+    environment_invocations: list[EnvironmentInvocation] = []
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
@@ -923,6 +929,20 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                     existing.failure_kind = invocation.failure_kind
         except Exception:
             gaps.append(ObservationGap(code="verifier_invocation_invalid"))
+    # Environment ownership and role come only from what the environment declared on each captured request;
+    # the inherited verifier contract is unchanged.
+    for raw_invocation in capture.get("environment_invocations") or []:
+        try:
+            invocation = EnvironmentInvocation.model_validate(raw_invocation)
+            existing = next((i for i in environment_invocations if i.invocation_id == invocation.invocation_id), None)
+            if existing is None:
+                environment_invocations.append(invocation)
+            elif existing.role != invocation.role:
+                gaps.append(ObservationGap(code="environment_invocation_invalid", detail=invocation.invocation_id))
+            else:
+                existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+        except Exception:
+            gaps.append(ObservationGap(code="environment_invocation_invalid"))
 
     for raw_gap in capture.get("gaps") or []:
         if isinstance(raw_gap, dict):
@@ -940,6 +960,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             model_calls,
             result.get("resolved"),
             verifier_invocations=verifier_invocations,
+            environment_invocations=environment_invocations,
         )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
@@ -957,6 +978,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         rollout_id=rollout_id,
         invocations=invocations,
         verifier_invocations=verifier_invocations,
+        environment_invocations=environment_invocations,
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
