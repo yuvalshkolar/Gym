@@ -26,7 +26,7 @@ from pytest import CaptureFixture, MonkeyPatch
 import nemo_gym.cli.dev as cli_dev
 import nemo_gym.config.global_config as gc
 from nemo_gym.cli.main import main
-from nemo_gym.rollout_compare import (
+from nemo_gym.eval.rollout_compare import (
     CompareInputError,
     RolloutCompareConfig,
     compare_rollouts,
